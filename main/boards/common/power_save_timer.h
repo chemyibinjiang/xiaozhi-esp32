@@ -7,7 +7,7 @@
 
 class PowerSaveTimer {
 public:
-    PowerSaveTimer(int cpu_max_freq, int seconds_to_sleep = 20, int seconds_to_shutdown = -1);
+    PowerSaveTimer(int cpu_max_freq, int seconds_to_sleep = 3600, int seconds_to_shutdown = -1);
     ~PowerSaveTimer();
 
     void SetEnabled(bool enabled);

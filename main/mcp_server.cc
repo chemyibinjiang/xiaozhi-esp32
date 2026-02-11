@@ -241,45 +241,60 @@ void McpServer::AddUserOnlyTools() {
                 return true;
             });
         
+        auto preview_image_callback = [display](const PropertyList& properties) -> ReturnValue {
+            auto url = properties["url"].value<std::string>();
+            auto http = Board::GetInstance().GetNetwork()->CreateHttp(3);
+
+            if (!http->Open("GET", url)) {
+                throw std::runtime_error("Failed to open URL: " + url);
+            }
+            int status_code = http->GetStatusCode();
+            if (status_code != 200) {
+                throw std::runtime_error("Unexpected status code: " + std::to_string(status_code));
+            }
+
+            size_t content_length = http->GetBodyLength();
+            char* data = (char*)heap_caps_malloc(content_length, MALLOC_CAP_8BIT);
+            if (data == nullptr) {
+                throw std::runtime_error("Failed to allocate memory for image: " + url);
+            }
+            size_t total_read = 0;
+            while (total_read < content_length) {
+                int ret = http->Read(data + total_read, content_length - total_read);
+                if (ret < 0) {
+                    heap_caps_free(data);
+                    throw std::runtime_error("Failed to download image: " + url);
+                }
+                if (ret == 0) {
+                    break;
+                }
+                total_read += ret;
+            }
+            http->Close();
+
+            auto image = std::make_unique<LvglAllocatedImage>(data, content_length);
+            display->SetPreviewImage(std::move(image));
+            return true;
+        };
+
         AddUserOnlyTool("self.screen.preview_image", "Preview an image on the screen",
             PropertyList({
                 Property("url", kPropertyTypeString)
             }),
-            [display](const PropertyList& properties) -> ReturnValue {
-                auto url = properties["url"].value<std::string>();
-                auto http = Board::GetInstance().GetNetwork()->CreateHttp(3);
+            preview_image_callback);
 
-                if (!http->Open("GET", url)) {
-                    throw std::runtime_error("Failed to open URL: " + url);
-                }
-                int status_code = http->GetStatusCode();
-                if (status_code != 200) {
-                    throw std::runtime_error("Unexpected status code: " + std::to_string(status_code));
-                }
+        // Aliases for compatibility with existing scripts/prompts.
+        AddUserOnlyTool("self.screen.preview_screen_shot", "Preview an image on the screen",
+            PropertyList({
+                Property("url", kPropertyTypeString)
+            }),
+            preview_image_callback);
 
-                size_t content_length = http->GetBodyLength();
-                char* data = (char*)heap_caps_malloc(content_length, MALLOC_CAP_8BIT);
-                if (data == nullptr) {
-                    throw std::runtime_error("Failed to allocate memory for image: " + url);
-                }
-                size_t total_read = 0;
-                while (total_read < content_length) {
-                    int ret = http->Read(data + total_read, content_length - total_read);
-                    if (ret < 0) {
-                        heap_caps_free(data);
-                        throw std::runtime_error("Failed to download image: " + url);
-                    }
-                    if (ret == 0) {
-                        break;
-                    }
-                    total_read += ret;
-                }
-                http->Close();
-
-                auto image = std::make_unique<LvglAllocatedImage>(data, content_length);
-                display->SetPreviewImage(std::move(image));
-                return true;
-            });
+        AddUserOnlyTool("preview_screen_shot", "Preview an image on the screen",
+            PropertyList({
+                Property("url", kPropertyTypeString)
+            }),
+            preview_image_callback);
 #endif // CONFIG_LV_USE_SNAPSHOT
     }
 #endif // HAVE_LVGL

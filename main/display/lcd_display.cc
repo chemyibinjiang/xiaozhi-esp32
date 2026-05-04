@@ -502,6 +502,9 @@ void LcdDisplay::SetupUI() {
 #define  MAX_MESSAGES 20
 #endif
 void LcdDisplay::SetChatMessage(const char* role, const char* content) {
+    role = role != nullptr ? role : "";
+    content = content != nullptr ? content : "";
+
     if (!setup_ui_called_) {
         ESP_LOGW(TAG, "SetChatMessage('%s', '%s') called before SetupUI() - message will be lost!", role, content);
     }
@@ -512,7 +515,7 @@ void LcdDisplay::SetChatMessage(const char* role, const char* content) {
         }
         return;
     }
-    
+
     // Check if message count exceeds limit
     uint32_t child_count = lv_obj_get_child_cnt(content_);
     if (child_count >= MAX_MESSAGES) {
@@ -558,7 +561,7 @@ void LcdDisplay::SetChatMessage(const char* role, const char* content) {
     }
 
     // Avoid empty message boxes
-    if(strlen(content) == 0) {
+    if (content[0] == '\0') {
         return;
     }
 
@@ -577,8 +580,8 @@ void LcdDisplay::SetChatMessage(const char* role, const char* content) {
     
     // Calculate bubble width constraints
     lv_coord_t max_width = LV_HOR_RES * 85 / 100 - 16;  // 85% of screen width
-    lv_coord_t min_width = 20;  
-    
+    lv_coord_t min_width = 20;
+
     // Let LVGL calculate the natural text width first
     lv_obj_set_width(msg_text, LV_SIZE_CONTENT);
     lv_obj_update_layout(msg_text);
@@ -628,7 +631,7 @@ void LcdDisplay::SetChatMessage(const char* role, const char* content) {
         lv_obj_set_user_data(msg_bubble, (void*)"assistant");
         
         // Set appropriate width for content
-        lv_obj_set_width(msg_bubble, LV_SIZE_CONTENT);
+        lv_obj_set_width(msg_bubble, bubble_width);
         lv_obj_set_height(msg_bubble, LV_SIZE_CONTENT);
         
         // Don't grow
@@ -953,7 +956,6 @@ void LcdDisplay::SetupUI() {
     lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
     lv_obj_set_style_anim(chat_message_label_, &a, LV_PART_MAIN);
     lv_obj_set_style_anim_duration(chat_message_label_, lv_anim_speed_clamped(60, 300, 60000), LV_PART_MAIN);
-
     low_battery_popup_ = lv_obj_create(screen);
     lv_obj_set_scrollbar_mode(low_battery_popup_, LV_SCROLLBAR_MODE_OFF);
     lv_obj_set_size(low_battery_popup_, LV_HOR_RES * 0.9, text_font->line_height * 2);

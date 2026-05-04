@@ -524,8 +524,19 @@ void Application::InitializeProtocol() {
         if (strcmp(type->valuestring, "tts") == 0) {
             auto state = cJSON_GetObjectItem(root, "state");
             if (strcmp(state->valuestring, "start") == 0) {
-                Schedule([this]() {
+                auto text = cJSON_GetObjectItem(root, "text");
+                std::string start_message;
+                if (cJSON_IsString(text) && text->valuestring != nullptr) {
+                    start_message = text->valuestring;
+                    ESP_LOGI(TAG, "<< %s", start_message.c_str());
+                }
+                Schedule([this, display, start_message = std::move(start_message)]() {
                     aborted_ = false;
+                    // Some servers include the first subtitle on the TTS start
+                    // event so the device can render text immediately.
+                    if (!start_message.empty()) {
+                        display->SetChatMessage("assistant", start_message.c_str());
+                    }
                     SetDeviceState(kDeviceStateSpeaking);
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {

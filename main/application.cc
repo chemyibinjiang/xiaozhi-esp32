@@ -10,6 +10,7 @@
 #include "assets.h"
 #include "settings.h"
 
+#include <cctype>
 #include <cstring>
 #include <esp_log.h>
 #include <cJSON.h>
@@ -18,6 +19,85 @@
 #include <font_awesome.h>
 
 #define TAG "Application"
+
+namespace {
+
+std::string NormalizeSubtitleText(const char* text) {
+    if (text == nullptr) {
+        return {};
+    }
+
+    std::string normalized(text);
+    for (char& ch : normalized) {
+        if (ch == '\r' || ch == '\n' || ch == '\t') {
+            ch = ' ';
+        }
+    }
+
+    auto first = normalized.find_first_not_of(' ');
+    if (first == std::string::npos) {
+        return {};
+    }
+
+    auto last = normalized.find_last_not_of(' ');
+    return normalized.substr(first, last - first + 1);
+}
+
+size_t CountUtf8CodePoints(const std::string& text) {
+    size_t count = 0;
+    for (unsigned char ch : text) {
+        if ((ch & 0xC0) != 0x80) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+bool ShouldDisplayLlmSubtitle(const std::string& text) {
+    if (text.empty()) {
+        return false;
+    }
+
+    for (unsigned char ch : text) {
+        if (ch < 0x80 && std::isalnum(ch)) {
+            return true;
+        }
+    }
+
+    // Ignore single-codepoint payloads such as emoji-only llm text.
+    return CountUtf8CodePoints(text) > 1;
+}
+
+bool ShouldDisplaySttSubtitle(const std::string& text) {
+    if (text.empty()) {
+        return false;
+    }
+
+    // Filter protocol/status markers such as [Thinking Finished] so they
+    // do not overwrite the assistant subtitle bar mid-response.
+    return !(text.size() >= 2 && text.front() == '[' && text.back() == ']');
+}
+
+bool EndsWith(const std::string& text, const std::string& suffix) {
+    return text.size() >= suffix.size() &&
+           text.compare(text.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+std::string AppendAssistantSubtitle(const std::string& current, const std::string& next) {
+    if (next.empty()) {
+        return current;
+    }
+
+    if (current.empty() || current == next || EndsWith(current, next)) {
+        return current.empty() ? next : current;
+    }
+
+    std::string combined = current;
+    combined += next;
+    return combined;
+}
+
+}  // namespace
 
 
 Application::Application() {
@@ -513,6 +593,7 @@ void Application::InitializeProtocol() {
         board.SetPowerSaveLevel(PowerSaveLevel::LOW_POWER);
         Schedule([this]() {
             auto display = Board::GetInstance().GetDisplay();
+            current_assistant_subtitle_.clear();
             display->SetChatMessage("system", "");
             SetDeviceState(kDeviceStateIdle);
         });
@@ -525,19 +606,20 @@ void Application::InitializeProtocol() {
             auto state = cJSON_GetObjectItem(root, "state");
             if (strcmp(state->valuestring, "start") == 0) {
                 auto text = cJSON_GetObjectItem(root, "text");
-                std::string start_message;
-                if (cJSON_IsString(text) && text->valuestring != nullptr) {
-                    start_message = text->valuestring;
+                std::string start_message = NormalizeSubtitleText(
+                    cJSON_IsString(text) ? text->valuestring : nullptr);
+                if (!start_message.empty()) {
                     ESP_LOGI(TAG, "<< %s", start_message.c_str());
                 }
                 Schedule([this, display, start_message = std::move(start_message)]() {
                     aborted_ = false;
+                    current_assistant_subtitle_ = start_message;
                     // Some servers include the first subtitle on the TTS start
                     // event so the device can render text immediately.
+                    SetDeviceState(kDeviceStateSpeaking);
                     if (!start_message.empty()) {
                         display->SetChatMessage("assistant", start_message.c_str());
                     }
-                    SetDeviceState(kDeviceStateSpeaking);
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {
                 Schedule([this]() {
@@ -551,18 +633,28 @@ void Application::InitializeProtocol() {
                 });
             } else if (strcmp(state->valuestring, "sentence_start") == 0) {
                 auto text = cJSON_GetObjectItem(root, "text");
-                if (cJSON_IsString(text)) {
-                    ESP_LOGI(TAG, "<< %s", text->valuestring);
-                    Schedule([display, message = std::string(text->valuestring)]() {
-                        display->SetChatMessage("assistant", message.c_str());
+                std::string message = NormalizeSubtitleText(
+                    cJSON_IsString(text) ? text->valuestring : nullptr);
+                if (!message.empty()) {
+                    ESP_LOGI(TAG, "<< %s", message.c_str());
+                    Schedule([this, display, message = std::move(message)]() {
+                        current_assistant_subtitle_ =
+                            AppendAssistantSubtitle(current_assistant_subtitle_, message);
+                        display->SetChatMessage("assistant", current_assistant_subtitle_.c_str());
                     });
                 }
             }
         } else if (strcmp(type->valuestring, "stt") == 0) {
             auto text = cJSON_GetObjectItem(root, "text");
-            if (cJSON_IsString(text)) {
-                ESP_LOGI(TAG, ">> %s", text->valuestring);
-                Schedule([display, message = std::string(text->valuestring)]() {
+            std::string message = NormalizeSubtitleText(
+                cJSON_IsString(text) ? text->valuestring : nullptr);
+            if (ShouldDisplaySttSubtitle(message)) {
+                ESP_LOGI(TAG, ">> %s", message.c_str());
+                Schedule([this, display, message = std::move(message)]() {
+                    if (GetDeviceState() == kDeviceStateSpeaking &&
+                        !current_assistant_subtitle_.empty()) {
+                        return;
+                    }
                     display->SetChatMessage("user", message.c_str());
                 });
             }
@@ -571,6 +663,17 @@ void Application::InitializeProtocol() {
             if (cJSON_IsString(emotion)) {
                 Schedule([display, emotion_str = std::string(emotion->valuestring)]() {
                     display->SetEmotion(emotion_str.c_str());
+                });
+            }
+            auto text = cJSON_GetObjectItem(root, "text");
+            std::string message = NormalizeSubtitleText(
+                cJSON_IsString(text) ? text->valuestring : nullptr);
+            if (ShouldDisplayLlmSubtitle(message)) {
+                ESP_LOGI(TAG, "<<[llm] %s", message.c_str());
+                Schedule([this, display, message = std::move(message)]() {
+                    current_assistant_subtitle_ =
+                        AppendAssistantSubtitle(current_assistant_subtitle_, message);
+                    display->SetChatMessage("assistant", current_assistant_subtitle_.c_str());
                 });
             }
         } else if (strcmp(type->valuestring, "mcp") == 0) {
@@ -875,6 +978,7 @@ void Application::HandleStateChangedEvent() {
     switch (new_state) {
         case kDeviceStateUnknown:
         case kDeviceStateIdle:
+            current_assistant_subtitle_.clear();
             display->SetStatus(Lang::Strings::STANDBY);
             display->ClearChatMessages();  // Clear messages first
             display->SetEmotion("neutral"); // Then set emotion (wechat mode checks child count)
@@ -882,6 +986,7 @@ void Application::HandleStateChangedEvent() {
             audio_service_.EnableWakeWordDetection(true);
             break;
         case kDeviceStateConnecting:
+            current_assistant_subtitle_.clear();
             display->SetStatus(Lang::Strings::CONNECTING);
             display->SetEmotion("neutral");
             display->SetChatMessage("system", "");
@@ -919,6 +1024,9 @@ void Application::HandleStateChangedEvent() {
             break;
         case kDeviceStateSpeaking:
             display->SetStatus(Lang::Strings::SPEAKING);
+            if (!current_assistant_subtitle_.empty()) {
+                display->SetChatMessage("assistant", current_assistant_subtitle_.c_str());
+            }
 
             if (listening_mode_ != kListeningModeRealtime) {
                 audio_service_.EnableVoiceProcessing(false);
